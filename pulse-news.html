@@ -439,7 +439,7 @@ const colorFor = id => (CATS.find(c=>c.id===id)||{}).color || 'var(--violet)';
    turn calls NewsAPI with the key kept server-side. The backend reshapes
    NewsAPI's response into the {id, cat, title, excerpt, source, time,
    image, tags, body} shape this frontend already expects. */
-const BACKEND_URL = 'http://localhost:5000';
+const BACKEND_URL = 'https://pulse-news-website.onrender.com';
 
 async function loadArticles(q, category){
   const params = new URLSearchParams();
