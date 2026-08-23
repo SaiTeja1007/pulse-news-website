@@ -769,6 +769,7 @@ function renderPills(){
     btn.addEventListener('click', ()=>{
       activeCat = btn.dataset.cat;
       renderPills();
+      window.scrollTo({ top: 0, behavior: 'instant' });
       refresh();
     });
   });
@@ -1034,6 +1035,7 @@ function renderGrid(){
         document.getElementById('searchInput').value = query;
         activeCat = 'all';
         renderPills();
+        window.scrollTo({ top: 0, behavior: 'instant' });
         refresh();
       });
     });
@@ -1157,6 +1159,7 @@ function renderArticleAside(a){
       activeCat = btn.dataset.cat;
       renderPills();
       closeArticle();
+      window.scrollTo({ top: 0, behavior: 'instant' });
       refresh();
     });
   });
