@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>pulse. — news that keeps up</title>
+<!-- BUILD_VERSION: 2026-08-23-wikipedia-image-search -- if you don't see this string in "View Page Source" on your live site, the browser/CDN is still serving an old cached copy. -->
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
@@ -358,9 +360,35 @@
     .wrap{padding:0 16px;}
   }
   @media (prefers-reduced-motion: reduce){ *{transition:none !important; animation:none !important;} }
+
+  /* ---------- loading overlay ---------- */
+  .loading-overlay{
+    position:fixed; inset:0; z-index:200; background:var(--bg);
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px;
+    opacity:1; transition:opacity .4s ease, visibility .4s ease;
+  }
+  .loading-overlay.hidden{ opacity:0; visibility:hidden; pointer-events:none; }
+  .loading-spinner{
+    width:38px; height:38px; border-radius:50%;
+    border:3px solid var(--border); border-top-color:var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  .loading-overlay p{
+    font-family:'IBM Plex Mono',monospace; font-size:12.5px; letter-spacing:.04em;
+    color:var(--ink-soft); margin:0;
+  }
+  @media (prefers-reduced-motion: reduce){
+    .loading-spinner{ animation:none; border-top-color:var(--border); }
+  }
 </style>
 </head>
 <body>
+
+<div class="loading-overlay hidden" id="loadingOverlay">
+  <div class="loading-spinner"></div>
+  <p id="loadingText">Fetching the latest headlines…</p>
+</div>
 
 <header>
   <div class="wrap">
@@ -496,6 +524,78 @@ const CATS = [
 ];
 const colorFor = id => (CATS.find(c=>c.id===id)||{}).color || 'var(--violet)';
 
+/* Test every article's real image once, before we render anything. If it
+   loads and decodes cleanly, keep the article. If it's missing or broken,
+   drop the article from the list entirely instead of showing a placeholder
+   — every story on screen ends up with its own real photo, no stand-ins.
+   img.decode() forces the browser to fully decode the pixels while the
+   overlay is still up, instead of just confirming the bytes arrived —
+   that's what was causing a pop-in delay after the overlay closed. */
+function loadAndDecode(url, timeoutMs){
+  return new Promise(resolve=>{
+    let settled = false;
+    const img = new Image();
+    const finish = ok => { if(settled) return; settled = true; resolve(ok); };
+    img.onload = () => {
+      // Some sites serve a tiny blank/transparent placeholder instead of
+      // erroring when they detect hotlinking (loading their image from a
+      // different site than their own) — that still fires onload with no
+      // error, so a plain success check isn't enough. Require the image
+      // to actually have real photo-sized dimensions.
+      const realPhoto = img.naturalWidth >= 80 && img.naturalHeight >= 80;
+      if(!realPhoto) return finish(false);
+      img.decode ? img.decode().then(()=>finish(true)).catch(()=>finish(true)) : finish(true);
+    };
+    img.onerror = () => finish(false);
+    img.src = url;
+    setTimeout(()=> finish(false), timeoutMs);
+  });
+}
+
+// Trims a headline down to something search-friendly — drops the trailing
+// " - Source" / " | Source" and stray quote marks, so "Anna Faris says
+// she tries to 'challenge' her religious son... - Yahoo" becomes just
+// "Anna Faris says she tries to challenge her religious son".
+function searchQueryFromTitle(title){
+  return title.split(/\s[-|]\s(?=[^-|]*$)/)[0].replace(/[“”"']/g, '').trim();
+}
+
+// Wikipedia's search API is free, needs no API key, and supports CORS
+// (origin=*) — used to find a real, relevant photo of whoever/whatever
+// an article is actually about, when the article's own image is broken.
+async function wikipediaThumb(query, timeoutMs = 3500){
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(()=> controller.abort(), timeoutMs);
+    const url = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&prop=pageimages&piprop=thumbnail&pithumbsize=900&format=json&origin=*`;
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if(!res.ok) return null;
+    const data = await res.json();
+    const pages = data && data.query && data.query.pages;
+    if(!pages) return null;
+    const first = Object.values(pages)[0];
+    return (first && first.thumbnail && first.thumbnail.source) || null;
+  } catch (e) {
+    return null; // timed out or blocked — treat same as "no photo found"
+  }
+}
+
+async function resolveArticleImages(list, timeoutMs = 4000){
+  const checked = await Promise.all(list.map(async a=>{
+    if(a.image && await loadAndDecode(a.image, timeoutMs)){ a._img = a.image; return true; }
+    // The article's own image is missing/broken — look up its actual
+    // subject on Wikipedia and use a real photo of them/it instead of
+    // just dropping the story.
+    const wiki = await wikipediaThumb(searchQueryFromTitle(a.title));
+    if(wiki && await loadAndDecode(wiki, timeoutMs)){ a._img = wiki; return true; }
+    return false;
+  }));
+  // Still no usable photo after trying both? Then, and only then, leave
+  // the story out of the feed.
+  return list.filter((a,i)=> checked[i]);
+}
+
 /* ---------------- live data via backend ----------------
    loadArticles() now calls our own Flask server at BACKEND_URL, which in
    turn calls NewsAPI with the key kept server-side. The backend reshapes
@@ -509,7 +609,7 @@ async function loadArticles(q, category){
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   if (category && category !== 'all') params.set('category', category);
-  params.set('pageSize', '30');
+  params.set('pageSize', '45'); // fetch extra since some will get dropped for missing/broken images
 
   const url = `${BACKEND_URL}/api/news?${params.toString()}`;
 
@@ -524,6 +624,7 @@ async function loadArticles(q, category){
       if (attempt > 1){
         isWakingUp = true;
         renderGrid();
+        setOverlayText('Waking up the news server, hang tight…');
       }
       const res = await fetch(url);
       if (!res.ok) {
@@ -548,8 +649,22 @@ function estReadTime(article){
 }
 
 function imgUrl(article){
-  return article.image || 'https://images.unsplash.com/photo-1495020689067-958852a7765e?w=900&q=60';
+  return article._img || article.image;
 }
+
+/* ---------------- loading overlay ----------------
+   Shown from the moment a fetch starts until the images that fetch needs
+   have actually finished loading (or timed out) — so the person never
+   watches thumbnails pop in one by one, on first load or on switching
+   category/search. */
+const loadingOverlay = document.getElementById('loadingOverlay');
+const loadingTextEl = document.getElementById('loadingText');
+function showOverlay(text){
+  loadingTextEl.textContent = text || 'Fetching the latest headlines…';
+  loadingOverlay.classList.remove('hidden');
+}
+function setOverlayText(text){ loadingTextEl.textContent = text; }
+function hideOverlay(){ loadingOverlay.classList.add('hidden'); }
 
 /* ---------------- state ---------------- */
 let allArticles = [];
@@ -772,19 +887,26 @@ function renderLiveStrip(freshId){
 async function refresh(){
   isLoading = true;
   lastError = null;
+  showOverlay('Fetching the latest headlines…');
   renderGrid();
   try {
-    allArticles = await loadArticles(query, activeCat);
+    const fetched = await loadArticles(query, activeCat);
+    setOverlayText('Loading images…');
+    allArticles = await resolveArticleImages(fetched);
     liveOrder = allArticles.slice(0, 8).map(a => a.id);
+    isLoading = false;
     renderHero();
     renderLiveStrip();
+    renderGrid();
   } catch (err) {
     lastError = err.message || 'Something went wrong loading news.';
     allArticles = [];
     liveOrder = [];
-  } finally {
     isLoading = false;
     renderGrid();
+  } finally {
+    isLoading = false;
+    hideOverlay();
   }
 }
 
