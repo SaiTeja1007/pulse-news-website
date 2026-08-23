@@ -1,17 +1,22 @@
 """
 pulse. backend
 --------------
-A tiny Flask server that sits between your HTML frontend and NewsAPI.
+A tiny Flask server that sits between your HTML frontend and Currents API
+(https://currentsapi.services).
 
-Why this exists: NewsAPI's free plan only allows browser-side requests from
-localhost, and even then it's a bad idea to ship an API key inside client-side
-JavaScript (anyone can open devtools and copy it). So the browser talks to
-this server, and this server is the only thing that ever sees the real key.
+Why Currents instead of NewsAPI: NewsAPI's free "Developer" plan delays every
+article by 24 hours by design (it's how they push people to the $449/mo paid
+plan) - that's why the site kept showing "1d ago" no matter what. Currents'
+free plan (250 requests/day, no credit card) has no such delay, so "Live
+updates" can actually be live.
+
+This server is the only thing that ever sees the real API key - the browser
+never gets it directly.
 
 Run it:
     pip install -r requirements.txt
     python app.py
-Then open pulse-news.html in your browser (or serve it) - it calls
+Then open index.html in your browser (or serve it) - it calls
 http://localhost:5000/api/news
 """
 
@@ -28,11 +33,11 @@ load_dotenv()
 
 app = Flask(__name__)
 
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
-NEWSAPI_BASE = "https://newsapi.org/v2"
+CURRENTS_API_KEY = os.environ.get("CURRENTS_API_KEY", "")
+CURRENTS_BASE = "https://api.currentsapi.services/v1"
 
-# The frontend's category pills -> NewsAPI's top-headlines categories.
-# NewsAPI doesn't have a "world" category, so we map it to "general".
+# The frontend's category pills -> Currents' legacy (v1) category values.
+# Currents doesn't have a "world" category, so we map it to "general".
 CATEGORY_MAP = {
     "technology": "technology",
     "business": "business",
@@ -42,8 +47,6 @@ CATEGORY_MAP = {
     "world": "general",
     "science": "science",
 }
-
-PLACEHOLDER_IMAGE = "https://images.unsplash.com/photo-1495020689067-958852a7765e?w=900&q=60"
 
 STOPWORDS = {
     "this", "that", "with", "from", "have", "their", "they", "after", "will",
@@ -66,14 +69,31 @@ def add_cors_headers(resp):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def relative_time(published_at: str) -> str:
-    if not published_at:
+def parse_published(raw: str):
+    """Currents timestamps look like '2026-08-23 14:05:00 +0000' (a space,
+    not a 'T'), which datetime.fromisoformat() can't parse directly. Try a
+    couple of shapes before giving up."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    candidates = [raw]
+    if " " in raw and "T" not in raw:
+        candidates.append(raw.replace(" ", "T", 1))
+    for candidate in candidates:
+        try:
+            dt = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def relative_time(dt) -> str:
+    if not dt:
         return "just now"
-    try:
-        dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-    except ValueError:
-        return "just now"
-    seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
+    seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
     if seconds < 60:
         return "just now"
     minutes = seconds // 60
@@ -114,19 +134,24 @@ def clean_title(title: str, source_name: str) -> str:
 
 def map_article(raw: dict, cat: str, hot: bool = False):
     url = raw.get("url") or ""
-    source_name = (raw.get("source") or {}).get("name") or "Unknown"
+    # Currents doesn't give a clean "source name" field like NewsAPI did -
+    # fall back to the domain out of the URL.
+    source_name = "Unknown"
+    m = re.search(r"https?://(?:www\.)?([^/]+)", url)
+    if m:
+        source_name = m.group(1)
+
     title = clean_title(raw.get("title") or "", source_name)
     description = (raw.get("description") or "").strip()
+    body = [description] if description else ["Full story available at the source link below."]
 
-    content = (raw.get("content") or "").strip()
-    # NewsAPI's free tier truncates content and appends "[+1234 chars]"
-    content = re.sub(r"\[\+\d+ chars\]$", "", content).strip()
+    published_dt = parse_published(raw.get("published") or "")
 
-    # dedupe while preserving order (content sometimes just repeats description)
-    seen = set()
-    body = [p for p in [description, content] if p and not (p in seen or seen.add(p))]
-    if not body:
-        body = ["Full story available at the source link below."]
+    # Currents sometimes literally returns the string "None" instead of a
+    # real null when there's no image - guard against that.
+    image = raw.get("image") or ""
+    if image in ("None", "null"):
+        image = ""
 
     return {
         "id": make_id(url),
@@ -134,8 +159,11 @@ def map_article(raw: dict, cat: str, hot: bool = False):
         "title": title,
         "excerpt": description or title,
         "source": source_name,
-        "time": relative_time(raw.get("publishedAt") or ""),
-        "image": raw.get("urlToImage") or PLACEHOLDER_IMAGE,
+        "time": relative_time(published_dt),
+        # Raw timestamp, passed through so the frontend can sort by actual
+        # recency (e.g. picking the newest items for "Live updates").
+        "publishedAt": published_dt.isoformat() if published_dt else "",
+        "image": image,
         "tags": guess_tags(title, description),
         "body": body,
         "hot": hot,
@@ -149,8 +177,8 @@ def map_article(raw: dict, cat: str, hot: bool = False):
 # ---------------------------------------------------------------------------
 @app.route("/api/news")
 def get_news():
-    if not NEWSAPI_KEY:
-        return jsonify({"error": "Server is missing NEWSAPI_KEY. Set it in .env."}), 500
+    if not CURRENTS_API_KEY:
+        return jsonify({"error": "Server is missing CURRENTS_API_KEY. Set it in .env."}), 500
 
     q = (request.args.get("q") or "").strip()
     category = (request.args.get("category") or "all").strip().lower()
@@ -159,39 +187,51 @@ def get_news():
     except ValueError:
         page_size = 30
 
-    params = {"apiKey": NEWSAPI_KEY, "pageSize": page_size, "language": "en"}
+    headers = {"Authorization": CURRENTS_API_KEY}
+    params = {"language": "en"}
 
     if q:
-        # /everything is the right endpoint for free-text search
-        endpoint = f"{NEWSAPI_BASE}/everything"
-        params["q"] = q
-        params["sortBy"] = "publishedAt"
+        # /search is the right endpoint for free-text queries. `limit` is
+        # only honoured on /search, not on /latest-news.
+        endpoint = f"{CURRENTS_BASE}/search"
+        params["keywords"] = q
+        params["limit"] = page_size
     else:
-        # /top-headlines for browsing by category (or the general front page)
-        endpoint = f"{NEWSAPI_BASE}/top-headlines"
-        params["country"] = "us"
+        # /latest-news for browsing by category (or the general front page).
+        endpoint = f"{CURRENTS_BASE}/latest-news"
+        params["country"] = "US"
         mapped = CATEGORY_MAP.get(category)
         if mapped:
             params["category"] = mapped
 
     try:
-        r = requests.get(endpoint, params=params, timeout=10)
+        r = requests.get(endpoint, headers=headers, params=params, timeout=10)
         data = r.json()
     except requests.RequestException as exc:
-        return jsonify({"error": f"Could not reach NewsAPI: {exc}"}), 502
+        return jsonify({"error": f"Could not reach Currents API: {exc}"}), 502
+    except ValueError:
+        return jsonify({"error": "Currents API returned an unexpected response"}), 502
 
     if data.get("status") != "ok":
-        return jsonify({"error": data.get("message", "NewsAPI returned an error")}), r.status_code
+        message = data.get("message") or data.get("error") or "Currents API returned an error"
+        return jsonify({"error": message}), r.status_code if r.status_code != 200 else 502
 
     raw_articles = [
-        a for a in data.get("articles", [])
+        a for a in data.get("news", [])
         if a.get("title") and a.get("title") != "[Removed]"
     ]
+
+    # Always sort newest-first ourselves - don't assume the API's own
+    # ordering matches actual publish time.
+    raw_articles.sort(
+        key=lambda a: parse_published(a.get("published") or "") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
     fallback_cat = category if category in CATEGORY_MAP else "world"
     articles = [
         map_article(a, fallback_cat, hot=(i < 6))
-        for i, a in enumerate(raw_articles)
+        for i, a in enumerate(raw_articles[:page_size])
     ]
 
     return jsonify({"status": "ok", "totalResults": len(articles), "articles": articles})
@@ -199,7 +239,7 @@ def get_news():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "hasKey": bool(NEWSAPI_KEY)})
+    return jsonify({"status": "ok", "hasKey": bool(CURRENTS_API_KEY)})
 
 
 if __name__ == "__main__":
