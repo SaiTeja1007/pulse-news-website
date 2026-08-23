@@ -132,17 +132,19 @@
     background:var(--surface-2);
   }
   .hero-slide{
-    position:absolute; inset:0; background-size:cover; background-position:center;
-    cursor:pointer; z-index:1; opacity:0; transform:translateX(100%);
+    position:absolute; inset:0; cursor:pointer; z-index:1; opacity:0; transform:translateX(100%);
     transition:transform .55s cubic-bezier(.65,0,.35,1);
-    touch-action:pan-y;
+    touch-action:pan-y; overflow:hidden;
   }
+  .hero-slide img{ position:absolute; inset:0; width:100%; height:100%; object-fit:cover; object-position:center 20%; z-index:0; }
+  .hero-slide.no-photo img{ display:none; }
+  .hero-slide.no-photo{ background:linear-gradient(135deg,var(--surface-2),var(--surface)); }
   .hero-slide.active{ transform:translateX(0); opacity:1; z-index:2; }
   .hero-slide.prev{ transform:translateX(-100%); opacity:1; z-index:1; }
   .hero-slide.next{ transform:translateX(100%); opacity:1; z-index:1; }
   .hero-slide.dragging{ transition:none; }
   .hero-slide::before{
-    content:''; position:absolute; inset:0;
+    content:''; position:absolute; inset:0; z-index:1;
     background:linear-gradient(0deg, rgba(8,9,14,0.90) 0%, rgba(8,9,14,0.5) 42%, rgba(8,9,14,0.08) 68%);
   }
   .hero-content{
@@ -189,7 +191,7 @@
   .count{font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--ink-soft);}
 
   .grid{
-    display:grid; grid-template-columns:repeat(3,1fr); gap:20px;
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:20px;
   }
   .card-full{ grid-column:1/-1; }
   .card-full .thumb{ height:220px; }
@@ -200,7 +202,10 @@
     transition: transform .2s ease, box-shadow .2s ease;
   }
   .card:hover{transform:translateY(-3px);}
-  .thumb{height:140px; background-size:cover; background-position:center; background-color:var(--surface-2); position:relative;}
+  .thumb{height:140px; background-size:cover; background-position:center; background-color:var(--surface-2); position:relative; overflow:hidden;}
+  .thumb img{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:block;}
+  .thumb.no-photo{background:linear-gradient(135deg,var(--surface-2),var(--surface));}
+  .thumb.no-photo img{display:none;}
   .thumb .catbar{position:absolute; top:0; left:0; right:0; height:4px;}
   .card-body{padding:16px; display:flex; flex-direction:column; gap:8px; flex:1;}
   .tagrow{display:flex; align-items:center; gap:8px;}
@@ -326,9 +331,7 @@
   .aside-cats .pill{ background:var(--surface-2); }
   @media(max-width:1040px){ .article-aside{ display:none; } }
   .related-wrap{ border-top:1px solid var(--border); margin-top:44px; padding-top:8px; }
-  .related-grid{ grid-template-columns:repeat(3,1fr); }
-  @media(max-width:900px){ .related-grid{grid-template-columns:repeat(2,1fr);} }
-  @media(max-width:640px){ .related-grid{grid-template-columns:1fr;} }
+  .related-grid{ grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); }
   .back-btn{
     display:inline-flex; align-items:center; gap:8px; background:var(--surface);
     border:1px solid var(--border); padding:10px 16px; border-radius:999px;
@@ -336,7 +339,7 @@
   }
   .back-btn:hover{border-color:var(--violet);}
   .article-hero{
-    width:100%; height:340px; border-radius:20px; background-size:cover; background-position:center;
+    width:100%; height:340px; border-radius:20px; background-size:cover; background-position:center 20%;
     background-color:var(--surface-2); margin-bottom:24px;
   }
   .article-head{max-width:720px;}
@@ -352,9 +355,7 @@
     .article-body{font-size:15.5px;}
   }
 
-  @media(max-width:900px){ .grid{grid-template-columns:repeat(2,1fr);} }
   @media(max-width:640px){
-    .grid{grid-template-columns:1fr;}
     .logo{font-size:18px;}
     .searchbox{padding:10px 16px;}
     .wrap{padding:0 16px;}
@@ -560,6 +561,33 @@ function searchQueryFromTitle(title){
   return title.split(/\s[-|]\s(?=[^-|]*$)/)[0].replace(/[“”"']/g, '').trim();
 }
 
+// Wikipedia article titles are almost never full news headlines - a
+// sentence like "City of El Paso confirms first West Nile death of 2026"
+// won't match anything. Pull out likely proper-noun phrases instead
+// (runs of capitalized words - "El Paso", "West Nile") since those tend
+// to have Wikipedia pages. Returns several candidates, longest first,
+// since the top match sometimes lands on a photo-less stub/disambig page.
+function entityQueriesFromTitle(title){
+  const clean = searchQueryFromTitle(title);
+  const runs = clean.match(/\b[A-Z][a-zA-Z.'-]*(?:\s+[A-Z][a-zA-Z.'-]*)*\b/g) || [];
+  const skip = new Set(['The','A','An','Is','How','Why','What','When','Where','New']);
+  return runs.filter(r => !skip.has(r) && r.length > 2)
+             .sort((a,b)=> b.length - a.length)
+             .slice(0, 3);
+}
+
+// Last-resort topical fallback when nothing else turns up a photo - a
+// generic, category-relevant image beats a plain gray box.
+const CATEGORY_FALLBACK_QUERY = {
+  technology: ['computer technology', 'circuit board'],
+  business: ['stock market', 'skyscraper office'],
+  sports: ['stadium', 'sports arena'],
+  health: ['hospital', 'medicine pills'],
+  entertainment: ['cinema', 'film reel'],
+  world: ['globe world map', 'city skyline'],
+  science: ['science laboratory', 'microscope'],
+};
+
 // Wikipedia's search API is free, needs no API key, and supports CORS
 // (origin=*) — used to find a real, relevant photo of whoever/whatever
 // an article is actually about, when the article's own image is broken.
@@ -582,18 +610,32 @@ async function wikipediaThumb(query, timeoutMs = 3500){
 }
 
 async function resolveArticleImages(list, timeoutMs = 4000){
-  const checked = await Promise.all(list.map(async a=>{
-    if(a.image && await loadAndDecode(a.image, timeoutMs)){ a._img = a.image; return true; }
-    // The article's own image is missing/broken — look up its actual
-    // subject on Wikipedia and use a real photo of them/it instead of
-    // just dropping the story.
-    const wiki = await wikipediaThumb(searchQueryFromTitle(a.title));
-    if(wiki && await loadAndDecode(wiki, timeoutMs)){ a._img = wiki; return true; }
-    return false;
+  // Every article is kept regardless of image outcome - dropping stories
+  // on a failed image check caused the visible article count to swing
+  // between refreshes (network conditions vary load to load, so a
+  // different subset "failed" each time). Since broken images now
+  // degrade gracefully in place (the onerror handler on render), there's
+  // no need to remove the story at all - just find the best photo we can.
+  await Promise.all(list.map(async a=>{
+    if(a.image && await loadAndDecode(a.image, timeoutMs)){ a._img = a.image; return; }
+
+    // Try each likely proper-noun subject in turn (longest first) - the
+    // top candidate sometimes lands on a Wikipedia page with no photo.
+    for (const q of entityQueriesFromTitle(a.title)){
+      const entityWiki = await wikipediaThumb(q);
+      if(entityWiki && await loadAndDecode(entityWiki, timeoutMs)){ a._img = entityWiki; return; }
+    }
+
+    // Fall back to a generic, category-relevant photo rather than a
+    // plain gray box.
+    for (const fallbackQuery of (CATEGORY_FALLBACK_QUERY[a.cat] || [])){
+      const catWiki = await wikipediaThumb(fallbackQuery);
+      if(catWiki && await loadAndDecode(catWiki, timeoutMs)){ a._img = catWiki; return; }
+    }
+
+    a._img = a.image || ''; // genuinely nothing usable - let onerror handle it
   }));
-  // Still no usable photo after trying both? Then, and only then, leave
-  // the story out of the feed.
-  return list.filter((a,i)=> checked[i]);
+  return list;
 }
 
 /* ---------------- live data via backend ----------------
@@ -642,6 +684,38 @@ async function loadArticles(q, category){
   isWakingUp = false;
   throw lastErr;
 }
+
+// auto-fit grids don't shrink column *count* just because the last row is
+// short — earlier rows already fill all columns, so a trailing row of 1-2
+// cards leaves real blank space. Rather than parse grid-template-columns
+// as a string (browsers report its computed value inconsistently for
+// auto-fit grids), measure how many cards actually land in the first row
+// by comparing their laid-out top offsets, then stretch the last card to
+// consume the leftover space in the final row.
+function fixTrailingRow(gridEl){
+  const cards = [...gridEl.querySelectorAll(':scope > .card')];
+  cards.forEach(c => c.style.gridColumn = '');
+  if (cards.length < 2) return;
+  const firstTop = cards[0].getBoundingClientRect().top;
+  let cols = 0;
+  for (const c of cards){
+    if (Math.abs(c.getBoundingClientRect().top - firstTop) < 1) cols++;
+    else break;
+  }
+  if (cols < 2) return;
+  const leftover = cards.length % cols;
+  if (leftover === 0) return;
+  cards[cards.length - 1].style.gridColumn = `span ${cols - leftover + 1}`;
+}
+let trailingRowResizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(trailingRowResizeTimer);
+  trailingRowResizeTimer = setTimeout(() => {
+    fixTrailingRow(grid);
+    const relatedGrid = document.getElementById('relatedGrid');
+    if (relatedGrid) fixTrailingRow(relatedGrid);
+  }, 150);
+});
 
 function estReadTime(article){
   const words = (article.body||[]).join(' ').split(/\s+/).length;
@@ -709,8 +783,9 @@ function renderHero(){
     const slide = document.createElement('div');
     slide.className = 'hero-slide' + (i===0?' active':'');
     slide.dataset.index = i;
-    slide.style.backgroundImage = `url(${imgUrl(a,1200)})`;
     slide.innerHTML = `
+      <img src="${imgUrl(a,1200)}" alt="" loading="${i===0?'eager':'lazy'}"
+           onerror="this.closest('.hero-slide').classList.add('no-photo')">
       <div class="hero-content">
         <span class="catchip">${a.cat}</span>
         <h2>${a.title}</h2>
@@ -964,11 +1039,11 @@ function renderGrid(){
     });
   } else {
     grid.innerHTML = list.map((a,i)=>{
-      const isLast = i === list.length-1;
-      const fullWidth = isLast && list.length>1 && list.length%3===1;
       return `
-      <article class="card${fullWidth?' card-full':''}" data-id="${a.id}">
-        <div class="thumb" style="background-image:url(${imgUrl(a,400)})">
+      <article class="card" data-id="${a.id}">
+        <div class="thumb">
+          <img src="${imgUrl(a,400)}" alt="" loading="lazy"
+               onerror="this.closest('.thumb').classList.add('no-photo')">
           <div class="catbar" style="background:${colorFor(a.cat)}"></div>
         </div>
         <div class="card-body">
@@ -982,6 +1057,7 @@ function renderGrid(){
     grid.querySelectorAll('.card').forEach(c=>{
       c.addEventListener('click', ()=> openArticle(Number(c.dataset.id)));
     });
+    fixTrailingRow(grid);
   }
   renderQuickReads(list);
 }
@@ -1026,14 +1102,20 @@ function buildArticleBodyHTML(a){
 }
 
 function renderRelated(a){
-  const related = allArticles
-    .filter(x=>x.id!==a.id && x.cat===a.cat)
-    .slice(0, 3);
+  const sameCat = allArticles.filter(x=>x.id!==a.id && x.cat===a.cat);
+  let related = sameCat.slice(0, 3);
+  if(related.length < 3){
+    const usedIds = new Set([a.id, ...related.map(r=>r.id)]);
+    const backfill = allArticles.filter(x=>!usedIds.has(x.id)).slice(0, 3-related.length);
+    related = related.concat(backfill);
+  }
   const relatedGrid = document.getElementById('relatedGrid');
   if(!related.length){ relatedGrid.innerHTML = ''; return; }
   relatedGrid.innerHTML = related.map(r=>`
     <article class="card" data-id="${r.id}">
-      <div class="thumb" style="background-image:url(${imgUrl(r,400)})">
+      <div class="thumb">
+        <img src="${imgUrl(r,400)}" alt="" loading="lazy"
+             onerror="this.closest('.thumb').classList.add('no-photo')">
         <div class="catbar" style="background:${colorFor(r.cat)}"></div>
       </div>
       <div class="card-body">
@@ -1047,6 +1129,7 @@ function renderRelated(a){
   relatedGrid.querySelectorAll('.card').forEach(c=>{
     c.addEventListener('click', ()=> openArticle(Number(c.dataset.id)));
   });
+  fixTrailingRow(relatedGrid);
 }
 
 function renderArticleAside(a){
