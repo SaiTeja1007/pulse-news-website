@@ -204,13 +204,38 @@ def get_news():
         if mapped:
             params["category"] = mapped
 
-    try:
-        r = requests.get(endpoint, headers=headers, params=params, timeout=10)
-        data = r.json()
-    except requests.RequestException as exc:
-        return jsonify({"error": f"Could not reach Currents API: {exc}"}), 502
-    except ValueError:
-        return jsonify({"error": "Currents API returned an unexpected response"}), 502
+    # Currents occasionally takes a while to respond (more so right after
+    # this server itself wakes up from Render's free-tier sleep, when the
+    # first outbound request pays a cold DNS/TLS cost). One slow response
+    # used to surface immediately as "Could not reach Currents API" with a
+    # ReadTimeout. Retry once with a longer timeout before giving up.
+    data = None
+    last_exc = None
+    for attempt, timeout in enumerate((10, 20), start=1):
+        try:
+            r = requests.get(endpoint, headers=headers, params=params, timeout=timeout)
+            data = r.json()
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            print(f"[news] attempt {attempt} failed ({timeout}s timeout): {exc}")
+        except ValueError:
+            return jsonify({"error": "Currents API returned an unexpected response"}), 502
+
+    if data is None:
+        return jsonify({"error": f"Could not reach Currents API: {last_exc}"}), 502
+
+    # DEBUG: if two different categories are returning the same articles,
+    # check the Render logs for this line. Compare the "params" and the
+    # first couple of "titles" across two requests (e.g. ?category=technology
+    # vs ?category=health). If params differ but titles are identical, the
+    # problem is upstream (Currents isn't honoring `category` for this plan/
+    # combination) rather than in this backend. Remove once diagnosed.
+    print(
+        f"[news] endpoint={endpoint} params={params} "
+        f"returned={len(data.get('news', []))} "
+        f"titles={[a.get('title') for a in data.get('news', [])[:3]]}"
+    )
 
     if data.get("status") != "ok":
         message = data.get("message") or data.get("error") or "Currents API returned an error"
