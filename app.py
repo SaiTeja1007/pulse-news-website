@@ -201,6 +201,7 @@ def get_news():
 
     params = {
         "language": "en",
+        "page_size": page_size,
     }
 
     if q:
