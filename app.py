@@ -25,7 +25,7 @@ import re
 import hashlib
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 import requests
 from dotenv import load_dotenv
 
@@ -175,6 +175,12 @@ def map_article(raw: dict, cat: str, hot: bool = False):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.route("/")
+def home():
+    return send_from_directory(".", "index.html")
+
+
 @app.route("/api/news")
 def get_news():
     if not CURRENTS_API_KEY:
