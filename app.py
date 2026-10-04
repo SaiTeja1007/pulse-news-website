@@ -223,6 +223,7 @@ def get_news():
     # used to surface immediately as "Could not reach Currents API" with a
     # ReadTimeout. Retry once with a longer timeout before giving up.
     data = None
+    r = None
     last_exc = None
     for attempt, timeout in enumerate((10, 20), start=1):
         try:
@@ -260,8 +261,17 @@ def get_news():
     )
 
     if data.get("status") != "ok":
-        message = data.get("message") or data.get("error") or "Currents API returned an error"
-        return jsonify({"error": message}), r.status_code if r.status_code != 200 else 502
+        message = (
+            data.get("message")
+            or data.get("error")
+            or "Currents API returned an error"
+        )
+
+        status_code = 502
+        if r is not None:
+            status_code = r.status_code if r.status_code >= 400 else 502
+
+        return jsonify({"error": message}), status_code
 
     raw_articles = [
         a for a in data.get("news", [])
