@@ -193,15 +193,22 @@ def get_news():
     except ValueError:
         page_size = 30
 
-    headers = {"Authorization": CURRENTS_API_KEY}
-    params = {"language": "en"}
+    headers = {
+    "Authorization": f"Bearer {CURRENTS_API_KEY}",
+    "Accept": "application/json",
+    "User-Agent": "pulse-news-app/1.0",
+    }
+
+    params = {
+        "language": "en",
+    }
 
     if q:
         # /search is the right endpoint for free-text queries. `limit` is
         # only honoured on /search, not on /latest-news.
         endpoint = f"{CURRENTS_BASE}/search"
         params["keywords"] = q
-        params["limit"] = page_size
+        params["page_size"] = page_size
     else:
         # /latest-news for browsing by category (or the general front page).
         endpoint = f"{CURRENTS_BASE}/latest-news"
@@ -226,7 +233,16 @@ def get_news():
             last_exc = exc
             print(f"[news] attempt {attempt} failed ({timeout}s timeout): {exc}")
         except ValueError:
-            return jsonify({"error": "Currents API returned an unexpected response"}), 502
+            print(
+                f"[news] Non-JSON response from Currents: "
+                f"status={r.status_code}, "
+                f"content_type={r.headers.get('content-type')}, "
+                f"body={r.text[:500]}"
+            )
+            return jsonify({
+                "error": "Currents API returned a non-JSON response",
+                "status": r.status_code
+            }), 502
 
     if data is None:
         return jsonify({"error": f"Could not reach Currents API: {last_exc}"}), 502
